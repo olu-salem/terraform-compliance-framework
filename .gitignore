@@ -1,0 +1,40 @@
+# Terraform files
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+*.tfplan.binary
+tfplan.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Sensitive variable files — never commit prod secrets
+environments/staging/terraform.tfvars
+environments/prod/terraform.tfvars
+*.auto.tfvars
+
+# Reports
+reports/
+
+# Go test cache
+tests/vendor/
+tests/*.test
+
+# Local scripts
+*.sh.local
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Credentials
+*.pem
+*.key
+credentials
