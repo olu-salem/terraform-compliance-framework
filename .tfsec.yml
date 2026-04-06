@@ -1,0 +1,5 @@
+# tfsec — https://aquasecurity.github.io/tfsec/
+# Severity is enforced via CLI (see Makefile / CI). Add rule IDs under
+# `exclude` only after documenting the risk acceptance.
+
+exclude: []

@@ -6,8 +6,9 @@
 #
 # Creates:
 #   - S3 bucket for Terraform state with versioning + encryption
-#   - DynamoDB table for state locking
 #   - KMS key for state file encryption
+#
+# State locking uses Terraform S3 native lockfile (use_lockfile=true); no DynamoDB table.
 #
 # Usage:
 #   ./bootstrap-state.sh --account-id 123456789012 --region us-east-1 --env dev
@@ -35,7 +36,6 @@ if [[ -z "$ACCOUNT_ID" || -z "$ENV" ]]; then
 fi
 
 BUCKET_NAME="enterprise-tfstate-${ENV}-${ACCOUNT_ID}"
-TABLE_NAME="enterprise-tfstate-lock-${ENV}"
 KMS_ALIAS="alias/enterprise-tfstate-${ENV}"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -72,7 +72,8 @@ else
     --key-id "${KMS_KEY_ID}" \
     --region "${REGION}"
 
-  KMS_KEY_ARN="arn:aws:kms:${REGION}:${ACCOUNT_ID}:${KMS_ALIAS}"
+  KMS_KEY_ARN=$(aws kms describe-key --key-id "${KMS_KEY_ID}" --region "${REGION}" \
+    --query "KeyMetadata.Arn" --output text)
   echo "  ✓ Created KMS key: ${KMS_KEY_ARN}"
 fi
 
@@ -133,26 +134,6 @@ else
   echo "  ✓ HTTPS-only policy applied"
 fi
 
-# ─── DynamoDB Lock Table ───────────────────────────────────────────────────────
-echo ""
-echo "▶ Creating DynamoDB lock table: ${TABLE_NAME}..."
-
-if aws dynamodb describe-table --table-name "${TABLE_NAME}" --region "${REGION}" &>/dev/null; then
-  echo "  ✓ DynamoDB table already exists: ${TABLE_NAME}"
-else
-  aws dynamodb create-table \
-    --table-name "${TABLE_NAME}" \
-    --attribute-definitions AttributeName=LockID,AttributeType=S \
-    --key-schema AttributeName=LockID,KeyType=HASH \
-    --billing-mode PAY_PER_REQUEST \
-    --sse-specification Enabled=true,SSEType=KMS,KMSMasterKeyId="${KMS_KEY_ARN}" \
-    --region "${REGION}" \
-    --tags "Key=Environment,Value=${ENV}" "Key=ManagedBy,Value=bootstrap-script" \
-    > /dev/null
-
-  echo "  ✓ DynamoDB table created with SSE-KMS"
-fi
-
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -164,7 +145,7 @@ echo "  terraform init \\"
 echo "    -backend-config=\"bucket=${BUCKET_NAME}\" \\"
 echo "    -backend-config=\"key=${ENV}/terraform.tfstate\" \\"
 echo "    -backend-config=\"region=${REGION}\" \\"
-echo "    -backend-config=\"dynamodb_table=${TABLE_NAME}\" \\"
+echo "    -backend-config=\"use_lockfile=true\" \\"
 echo "    -backend-config=\"kms_key_id=${KMS_KEY_ARN}\" \\"
 echo "    -backend-config=\"encrypt=true\""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

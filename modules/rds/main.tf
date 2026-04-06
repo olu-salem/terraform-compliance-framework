@@ -35,7 +35,7 @@ locals {
 # =============================================================================
 
 resource "aws_kms_key" "rds" {
-  description             = "KMS CMK for RDS Aurora encryption — ${local.identifier}"
+  description             = "KMS CMK for RDS Aurora encryption - ${local.identifier}"
   deletion_window_in_days = 30
   enable_key_rotation     = true
 
@@ -70,7 +70,7 @@ resource "aws_db_subnet_group" "main" {
 
 resource "aws_security_group" "rds" {
   name        = "${local.identifier}-rds-sg"
-  description = "RDS Aurora security group — allow only from app tier"
+  description = "RDS Aurora security group - allow only from app tier"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -106,7 +106,7 @@ resource "aws_secretsmanager_secret" "rds_credentials" {
   name                    = "${local.identifier}/rds/master-credentials"
   description             = "RDS Aurora master credentials for ${local.identifier}"
   kms_key_id              = aws_kms_key.rds.arn
-  recovery_window_in_days = 30 # Prevent accidental deletion
+  recovery_window_in_days = var.master_secret_recovery_window_days
 
   tags = merge(local.common_tags, {
     Name = "${local.identifier}-rds-credentials"
@@ -132,7 +132,7 @@ resource "aws_secretsmanager_secret_version" "rds_credentials" {
 resource "aws_rds_cluster_parameter_group" "main" {
   name        = "${local.identifier}-cluster-params"
   family      = "aurora-postgresql15"
-  description = "Aurora PostgreSQL cluster parameters — ${local.identifier}"
+  description = "Aurora PostgreSQL cluster parameters - ${local.identifier}"
 
   # Force SSL connections — PCI DSS 4.2, HIPAA 164.312(e)
   parameter {
@@ -180,9 +180,6 @@ resource "aws_rds_cluster" "main" {
   # PCI DSS 3.4 / HIPAA — Encrypt data at rest with CMK
   storage_encrypted = true
   kms_key_id        = aws_kms_key.rds.arn
-
-  # PCI DSS 1.2 — No public access
-  publicly_accessible = false
 
   # Automated backups — PCI DSS 12.10, SOC 2 A1.2
   backup_retention_period      = var.backup_retention_days

@@ -1,0 +1,76 @@
+# PR validation: format, validate, security scans, fast Go tests.
+name: Terraform CI
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: fmt validate modules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.8"
+          terraform_wrapper: false
+
+      - name: Terraform format (check)
+        run: terraform fmt -recursive -check -diff .
+
+      - name: Validate modules
+        run: |
+          set -e
+          for dir in modules/*/; do
+            echo "=== $dir ==="
+            (cd "$dir" && terraform init -backend=false -input=false && terraform validate)
+          done
+
+      - name: Validate environments/dev
+        run: |
+          cd environments/dev
+          terraform init -backend=false -input=false
+          terraform validate
+
+  security:
+    name: tfsec + checkov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          args: --minimum-severity HIGH --config-file .tfsec.yml
+
+      - name: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          quiet: true
+          download_external_modules: false
+          soft_fail: false
+
+  test-go:
+    name: terratest (short)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: go test -short
+        run: go test -v -short -timeout 15m ./...

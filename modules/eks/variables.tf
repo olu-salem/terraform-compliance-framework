@@ -36,9 +36,9 @@ variable "private_subnet_ids" {
 }
 
 variable "kubernetes_version" {
-  description = "Kubernetes version for the EKS cluster. Update regularly for security patches."
+  description = "Kubernetes version for the EKS cluster. Pin to a version returned by aws eks describe-cluster-versions in your region."
   type        = string
-  default     = "1.29"
+  default     = "1.35"
 }
 
 variable "public_api_endpoint" {
@@ -52,9 +52,23 @@ variable "public_api_endpoint" {
 }
 
 variable "api_allowed_cidrs" {
-  description = "CIDRs allowed to reach the public API endpoint. Only used if public_api_endpoint = true."
-  type        = list(string)
-  default     = []
+  description = <<-EOT
+    Public routable CIDRs allowed to reach the EKS public API endpoint. Only used if public_api_endpoint = true.
+    AWS rejects private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16). Use office/VPN egress /32s.
+    If empty while public access is on, defaults to 0.0.0.0/0 inside the module (dev/lab only; tighten for prod).
+  EOT
+  type    = list(string)
+  default = []
+
+  validation {
+    condition = alltrue([
+      for c in var.api_allowed_cidrs :
+      !can(regex("^10\\.", split("/", c)[0]))
+      && !can(regex("^172\\.(1[6-9]|2[0-9]|3[0-1])\\.", split("/", c)[0]))
+      && !can(regex("^192\\.168\\.", split("/", c)[0]))
+    ])
+    error_message = "api_allowed_cidrs must be publicly routable; private RFC1918 CIDRs are rejected by EKS for public_access_cidrs."
+  }
 }
 
 variable "service_cidr" {
@@ -83,7 +97,7 @@ variable "node_groups" {
     {
       "general" = {
         instance_types = ["m5.xlarge"]
-        ami_type       = "AL2_x86_64"
+        ami_type       = "AL2023_x86_64_STANDARD"
         disk_size      = 50
         desired_size   = 3
         min_size       = 1
@@ -109,6 +123,36 @@ variable "node_groups" {
   }))
 }
 
+variable "vpc_cni_use_prefix_delegation" {
+  description = "When true, enable prefix delegation on the VPC CNI add-on. Disable for small dev clusters if CoreDNS stays DEGRADED."
+  type        = bool
+  default     = true
+}
+
+variable "vpc_cni_use_irsa" {
+  description = "When true, attach the IRSA role to the VPC CNI add-on. When false, CNI uses the node instance role (AmazonEKS_CNI_Policy on nodes)."
+  type        = bool
+  default     = true
+}
+
+variable "coredns_addon_configuration_values" {
+  description = <<-EOT
+    Optional CoreDNS add-on configuration_values JSON string (aws eks describe-addon-configuration --addon-name coredns).
+    Use null for AWS defaults. Small clusters often need replicaCount 1 and podDisruptionBudget.enabled false to leave DEGRADED.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "enable_coredns_addon" {
+  description = <<-EOT
+    When false, do not manage the CoreDNS EKS add-on (avoids long apply timeouts if AWS reports DEGRADED forever).
+    In-cluster DNS will not work until you add CoreDNS (console, eksctl, or set this back to true after fixing the cluster).
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "addon_versions" {
   description = "Managed EKS add-on versions. Specify explicitly for production to avoid unexpected upgrades."
   type = object({
@@ -118,10 +162,10 @@ variable "addon_versions" {
     ebs_csi    = string
   })
   default = {
-    coredns    = "v1.11.1-eksbuild.4"
-    kube_proxy = "v1.29.0-eksbuild.1"
-    vpc_cni    = "v1.16.2-eksbuild.1"
-    ebs_csi    = "v1.27.0-eksbuild.1"
+    coredns    = "v1.13.2-eksbuild.4"
+    kube_proxy = "v1.35.3-eksbuild.2"
+    vpc_cni    = "v1.21.1-eksbuild.7"
+    ebs_csi    = "v1.57.1-eksbuild.1"
   }
 }
 

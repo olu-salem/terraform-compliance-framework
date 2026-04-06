@@ -31,7 +31,7 @@ data "aws_region" "current" {}
 # =============================================================================
 
 resource "aws_kms_key" "security" {
-  description             = "KMS key for security services — CloudTrail, Config, SecurityHub logs"
+  description             = "KMS key for security services - CloudTrail, Config, SecurityHub logs"
   deletion_window_in_days = 30
   enable_key_rotation     = true
 
@@ -60,6 +60,27 @@ resource "aws_kms_key" "security" {
             "kms:EncryptionContext:aws:cloudtrail:arn" = "arn:aws:cloudtrail:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:trail/${var.name}-${var.environment}-trail"
           }
         }
+      },
+      {
+        Sid    = "AllowCloudWatchLogs"
+        Effect = "Allow"
+        Principal = {
+          Service = "logs.${data.aws_region.current.name}.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:CreateGrant",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          ArnLike = {
+            "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:*"
+          }
+        }
       }
     ]
   })
@@ -79,7 +100,7 @@ resource "aws_kms_key" "security" {
 
 resource "aws_s3_bucket" "cloudtrail" {
   bucket        = "${var.name}-${var.environment}-cloudtrail-${data.aws_caller_identity.current.account_id}"
-  force_destroy = false
+  force_destroy = var.cloudtrail_s3_force_destroy
 
   tags = merge(local.common_tags, {
     Name    = "${var.name}-${var.environment}-cloudtrail-logs"
@@ -119,18 +140,18 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "AWSCloudTrailAclCheck"
-        Effect = "Allow"
+        Sid       = "AWSCloudTrailAclCheck"
+        Effect    = "Allow"
         Principal = { Service = "cloudtrail.amazonaws.com" }
-        Action   = "s3:GetBucketAcl"
-        Resource = aws_s3_bucket.cloudtrail.arn
+        Action    = "s3:GetBucketAcl"
+        Resource  = aws_s3_bucket.cloudtrail.arn
       },
       {
-        Sid    = "AWSCloudTrailWrite"
-        Effect = "Allow"
+        Sid       = "AWSCloudTrailWrite"
+        Effect    = "Allow"
         Principal = { Service = "cloudtrail.amazonaws.com" }
-        Action   = "s3:PutObject"
-        Resource = "${aws_s3_bucket.cloudtrail.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+        Action    = "s3:PutObject"
+        Resource  = "${aws_s3_bucket.cloudtrail.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
         Condition = {
           StringEquals = { "s3:x-amz-acl" = "bucket-owner-full-control" }
         }
@@ -258,9 +279,10 @@ resource "aws_guardduty_detector" "main" {
 
 resource "aws_securityhub_account" "main" {}
 
+# CIS v1.4.0+ uses regional standards/ ARN (legacy v1.2.0 used :::ruleset/...).
 resource "aws_securityhub_standards_subscription" "cis_aws" {
   depends_on    = [aws_securityhub_account.main]
-  standards_arn = "arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.4.0"
+  standards_arn = "arn:aws:securityhub:${data.aws_region.current.name}::standards/cis-aws-foundations-benchmark/v/1.4.0"
 }
 
 resource "aws_securityhub_standards_subscription" "aws_foundational" {
@@ -296,7 +318,7 @@ resource "aws_sns_topic_subscription" "security_email" {
 # =============================================================================
 
 # CIS 3.1 — Unauthorized API calls
-resource "aws_cloudwatch_metric_filter" "unauthorized_api" {
+resource "aws_cloudwatch_log_metric_filter" "unauthorized_api" {
   name           = "UnauthorizedAPICalls"
   log_group_name = aws_cloudwatch_log_group.cloudtrail.name
   pattern        = "{ ($.errorCode = \"*UnauthorizedAccess*\") || ($.errorCode = \"AccessDenied*\") }"
@@ -324,7 +346,7 @@ resource "aws_cloudwatch_metric_alarm" "unauthorized_api" {
 }
 
 # CIS 3.3 — Root account usage
-resource "aws_cloudwatch_metric_filter" "root_usage" {
+resource "aws_cloudwatch_log_metric_filter" "root_usage" {
   name           = "RootAccountUsage"
   log_group_name = aws_cloudwatch_log_group.cloudtrail.name
   pattern        = "{ $.userIdentity.type = \"Root\" && $.userIdentity.invokedBy NOT EXISTS && $.eventType != \"AwsServiceEvent\" }"
@@ -352,7 +374,7 @@ resource "aws_cloudwatch_metric_alarm" "root_usage" {
 }
 
 # CIS 3.4 — IAM policy changes
-resource "aws_cloudwatch_metric_filter" "iam_changes" {
+resource "aws_cloudwatch_log_metric_filter" "iam_changes" {
   name           = "IAMPolicyChanges"
   log_group_name = aws_cloudwatch_log_group.cloudtrail.name
   pattern        = "{($.eventName=DeleteGroupPolicy)||($.eventName=DeleteRolePolicy)||($.eventName=DeleteUserPolicy)||($.eventName=PutGroupPolicy)||($.eventName=PutRolePolicy)||($.eventName=PutUserPolicy)||($.eventName=CreatePolicy)||($.eventName=DeletePolicy)||($.eventName=CreatePolicyVersion)||($.eventName=DeletePolicyVersion)||($.eventName=SetDefaultPolicyVersion)}"

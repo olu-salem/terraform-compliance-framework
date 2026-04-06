@@ -36,9 +36,9 @@ variable "allowed_security_group_ids" {
 }
 
 variable "engine_version" {
-  description = "Aurora PostgreSQL engine version."
+  description = "Aurora PostgreSQL engine version (must exist in the target region; e.g. 15.17 for aurora-postgresql15)."
   type        = string
-  default     = "15.4"
+  default     = "15.17"
 }
 
 variable "instance_class" {
@@ -67,6 +67,17 @@ variable "master_username" {
   description = "Master username for the RDS cluster. Password is auto-generated and stored in Secrets Manager."
   type        = string
   default     = "dbadmin"
+}
+
+variable "master_secret_recovery_window_days" {
+  description = "Secrets Manager deletion recovery window. Use 0 in throwaway dev to avoid name blocked by pending-delete secrets."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.master_secret_recovery_window_days >= 0 && var.master_secret_recovery_window_days <= 30
+    error_message = "Recovery window must be between 0 and 30 days."
+  }
 }
 
 variable "backup_retention_days" {

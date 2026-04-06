@@ -2,16 +2,37 @@ package test
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	awssdk "github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/gruntwork-io/terratest/modules/aws"
 	"github.com/gruntwork-io/terratest/modules/random"
 	"github.com/gruntwork-io/terratest/modules/terraform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestRepoLayout runs in -short mode so CI can verify the workspace without AWS.
+func TestRepoLayout(t *testing.T) {
+	t.Parallel()
+	paths := []string{
+		"../modules/vpc/main.tf",
+		"../modules/s3/main.tf",
+		"../environments/dev/main.tf",
+		"../policies/opa/tagging.rego",
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected path %s: %v", p, err)
+		}
+	}
+}
 
 // =============================================================================
 // VPC Module Tests
@@ -20,6 +41,9 @@ import (
 // =============================================================================
 
 func TestVPCModule(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping live AWS test in -short mode (see Makefile test target)")
+	}
 	t.Parallel()
 
 	awsRegion := "us-east-1"
@@ -82,10 +106,17 @@ func TestVPCModule(t *testing.T) {
 	assert.Len(t, intraSubnets, 2, "Should create one intra subnet per AZ")
 
 	// CIS 5.4 — Verify private subnets don't auto-assign public IPs
-	for _, subnetID := range privateSubnets {
-		subnet := aws.GetSubnetById(t, subnetID, awsRegion)
-		assert.False(t, subnet.MapPublicIpOnLaunch,
-			"Private subnet %s should not auto-assign public IPs (CIS 5.4)", subnetID)
+	sess, err := aws.NewAuthenticatedSession(awsRegion)
+	require.NoError(t, err)
+	ec2Client := ec2.New(sess)
+	describeOut, err := ec2Client.DescribeSubnets(&ec2.DescribeSubnetsInput{
+		SubnetIds: awssdk.StringSlice(privateSubnets),
+	})
+	require.NoError(t, err)
+	for _, sn := range describeOut.Subnets {
+		id := awssdk.StringValue(sn.SubnetId)
+		assert.False(t, awssdk.BoolValue(sn.MapPublicIpOnLaunch),
+			"Private subnet %s should not auto-assign public IPs (CIS 5.4)", id)
 	}
 
 	// CIS 3.9 — Verify VPC flow logs are enabled
@@ -112,6 +143,9 @@ func TestVPCModule(t *testing.T) {
 // =============================================================================
 
 func TestS3Module(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping live AWS test in -short mode (see Makefile test target)")
+	}
 	t.Parallel()
 
 	awsRegion := "us-east-1"
@@ -139,23 +173,37 @@ func TestS3Module(t *testing.T) {
 
 	// CIS 2.1.5 — Verify public access is blocked
 	actualBucketName := terraform.Output(t, terraformOptions, "bucket_name")
-	
-	publicAccessBlock := aws.GetS3BucketPublicAccessBlock(t, awsRegion, actualBucketName)
-	assert.True(t, *publicAccessBlock.BlockPublicAcls,
+
+	sess, err := aws.NewAuthenticatedSession(awsRegion)
+	require.NoError(t, err)
+	s3Client := s3.New(sess)
+
+	pabOut, err := s3Client.GetPublicAccessBlock(&s3.GetPublicAccessBlockInput{
+		Bucket: awssdk.String(actualBucketName),
+	})
+	require.NoError(t, err)
+	pab := pabOut.PublicAccessBlockConfiguration
+	require.NotNil(t, pab)
+	assert.True(t, awssdk.BoolValue(pab.BlockPublicAcls),
 		"S3 block_public_acls must be true (CIS 2.1.5)")
-	assert.True(t, *publicAccessBlock.BlockPublicPolicy,
+	assert.True(t, awssdk.BoolValue(pab.BlockPublicPolicy),
 		"S3 block_public_policy must be true (CIS 2.1.5)")
-	assert.True(t, *publicAccessBlock.IgnorePublicAcls,
+	assert.True(t, awssdk.BoolValue(pab.IgnorePublicAcls),
 		"S3 ignore_public_acls must be true (CIS 2.1.5)")
-	assert.True(t, *publicAccessBlock.RestrictPublicBuckets,
+	assert.True(t, awssdk.BoolValue(pab.RestrictPublicBuckets),
 		"S3 restrict_public_buckets must be true (CIS 2.1.5)")
 
 	// CIS 2.1.1 — Verify SSE-KMS encryption
-	sseConfig := aws.GetS3BucketServerSideEncryptionConfiguration(t, awsRegion, actualBucketName)
-	require.NotNil(t, sseConfig, "SSE configuration should exist")
-	require.NotEmpty(t, sseConfig.Rules, "SSE rules should not be empty")
-	assert.Equal(t, "aws:kms",
-		*sseConfig.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm,
+	sseOut, err := s3Client.GetBucketEncryption(&s3.GetBucketEncryptionInput{
+		Bucket: awssdk.String(actualBucketName),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, sseOut.ServerSideEncryptionConfiguration)
+	rules := sseOut.ServerSideEncryptionConfiguration.Rules
+	require.NotEmpty(t, rules)
+	def := rules[0].ApplyServerSideEncryptionByDefault
+	require.NotNil(t, def)
+	assert.Equal(t, "aws:kms", awssdk.StringValue(def.SSEAlgorithm),
 		"S3 must use SSE-KMS, not SSE-S3 (CIS 2.1.1)")
 
 	// Verify versioning is enabled
@@ -181,13 +229,7 @@ func TestRDSModule(t *testing.T) {
 	uniqueID := random.UniqueId()
 	name := fmt.Sprintf("terratest-%s", strings.ToLower(uniqueID))
 
-	// For RDS tests, we need a VPC first
-	// In a real test suite, you'd use test fixtures or a pre-existing VPC
-	t.Log("Note: RDS module tests require VPC fixtures — using pre-provisioned test VPC")
-
-	// This is a simplified example — full implementation uses test helper
-	// that provisions a minimal VPC for the test and tears it down after
-	t.Log("⏭️  RDS module test requires live AWS environment — run with: go test -v -run TestRDSModule -timeout 30m")
+	t.Logf("RDS module test placeholder (region=%s unique=%s name=%s) — add VPC fixture + apply/destroy when ready", awsRegion, uniqueID, name)
 }
 
 // =============================================================================
@@ -205,15 +247,21 @@ func TestComplianceIntegration(t *testing.T) {
 	uniqueID := random.UniqueId()
 	name := fmt.Sprintf("terratest-int-%s", strings.ToLower(uniqueID))
 
-	// Test that OPA policy validates a compliant plan succeeds
+	planFile := filepath.Join(os.TempDir(), fmt.Sprintf("tfplan-compliance-%s.binary", uniqueID))
+
+	// Remote S3 backend is optional for this test — plan with local state.
 	compliantOptions := &terraform.Options{
 		TerraformDir: "../environments/dev",
+		VarFiles:     []string{"terraform.tfvars"},
 		Vars: map[string]interface{}{
 			"name":       name,
 			"aws_region": awsRegion,
 		},
-		PlanFilePath: "/tmp/tfplan.binary",
+		PlanFilePath: planFile,
 		NoColor:      true,
+		EnvVars: map[string]string{
+			"TF_CLI_ARGS_init": "-backend=false -input=false",
+		},
 	}
 
 	// Plan only — don't apply in integration test
@@ -232,6 +280,9 @@ func TestComplianceIntegration(t *testing.T) {
 // =============================================================================
 
 func TestTaggingEnforcement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping live AWS test in -short mode (see Makefile test target)")
+	}
 	t.Parallel()
 
 	// Test that missing tags cause a plan failure via terraform validation
@@ -251,9 +302,7 @@ func TestTaggingEnforcement(t *testing.T) {
 		NoColor: true,
 	}
 
-	defer terraform.Destroy(t, terraformOptions)
-
-	// Expect the plan to fail because of missing required tags
+	// Expect the plan to fail because of missing required tags (no apply — no destroy needed)
 	_, err := terraform.InitAndPlanE(t, terraformOptions)
 	require.Error(t, err, "Plan should fail when required tags are missing")
 	assert.Contains(t, err.Error(), "CostCenter",

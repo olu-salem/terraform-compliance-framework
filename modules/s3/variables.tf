@@ -61,7 +61,7 @@ variable "enable_intelligent_tiering" {
 variable "lifecycle_rules" {
   description = "Additional lifecycle rules for the bucket."
   type = list(object({
-    id             = string
+    id = string
     transitions = list(object({
       days          = number
       storage_class = string

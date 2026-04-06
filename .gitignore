@@ -5,6 +5,7 @@
 *.tfstate.backup
 *.tfplan
 *.tfplan.binary
+tfplan
 tfplan.json
 override.tf
 override.tf.json

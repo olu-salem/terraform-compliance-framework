@@ -52,7 +52,7 @@ This framework addresses a critical enterprise challenge: teams provision AWS in
 │  │  Management │    │   Security  │    │      Shared Services    │ │
 │  │   Account   │    │   Account   │    │        Account          │ │
 │  │             │    │ GuardDuty   │    │  Terraform State (S3)   │ │
-│  │ AWS Control │    │ Security Hub│    │  DynamoDB Lock Table    │ │
+│  │ AWS Control │    │ Security Hub│    │  S3 native state lock   │ │
 │  │   Tower     │    │ CloudTrail  │    │  ECR / Artifact Repo    │ │
 │  └─────────────┘    └─────────────┘    └─────────────────────────┘ │
 │                                                                     │
@@ -108,7 +108,7 @@ This framework addresses a critical enterprise challenge: teams provision AWS in
 
 ### Operational Excellence
 - **Modular design** each module is independently versioned and tested
-- **Remote state** with S3 backend, DynamoDB locking, and cross account state sharing
+- **Remote state** with S3 backend, **native S3 state locking** (`use_lockfile`), and cross-account state sharing
 - **Multi environment** dev/staging/prod with environment specific variable overrides
 - **Terratest** Go tests validate module behavior before merging
 
@@ -148,7 +148,7 @@ This framework addresses a critical enterprise challenge: teams provision AWS in
 
 ```bash
 # Required tooling
-terraform >= 1.6.0
+terraform >= 1.10.0   # minimum: S3 use_lockfile; use latest 1.14.x patch locally (e.g. 1.14.8)
 aws-cli >= 2.0
 go >= 1.21        # for Terratest
 tfsec >= 1.28     # security scanning
@@ -179,10 +179,10 @@ chmod +x bootstrap-state.sh
 ```
 
 This creates:
-- S3 bucket with versioning, encryption, and access logging
-- DynamoDB table for state locking
+- S3 bucket with versioning, encryption, and HTTPS-only policy
 - KMS key for state file encryption
-- IAM roles for cross-account state access
+
+State locking uses Terraform’s **S3 lockfile** (`use_lockfile=true` on init); no DynamoDB table is created.
 
 ### 2. Deploy an Environment
 
@@ -194,7 +194,9 @@ terraform init \
   -backend-config="bucket=enterprise-tfstate-dev-123456789012" \
   -backend-config="key=dev/terraform.tfstate" \
   -backend-config="region=us-east-1" \
-  -backend-config="dynamodb_table=enterprise-tfstate-lock-dev"
+  -backend-config="use_lockfile=true" \
+  -backend-config="encrypt=true" \
+  -backend-config="kms_key_id=arn:aws:kms:us-east-1:123456789012:key/EXAMPLE"
 
 # Review the plan
 terraform plan -var-file="terraform.tfvars" -out=tfplan
@@ -403,16 +405,14 @@ Mandatory cost allocation tags enforced by OPA:
 
 ### Recovering from State Lock
 
-```bash
-# If a pipeline fails mid-apply, the DynamoDB lock may persist
-# View current lock
-aws dynamodb get-item \
-  --table-name enterprise-tfstate-lock-dev \
-  --key '{"LockID": {"S": "dev/terraform.tfstate"}}'
+With **S3 `use_lockfile`**, Terraform stores lock metadata in the state bucket (alongside the state object). If a run stops mid-apply and you are sure **no other** Terraform process holds the lock:
 
-# Force unlock (use with caution — confirm no apply is running)
+```bash
+# Use the lock ID from the Terraform error output
 terraform force-unlock <LOCK_ID>
 ```
+
+If you previously used **DynamoDB** locking, run `terraform init -reconfigure` with `use_lockfile=true` and **without** `dynamodb_table`, then `terraform force-unlock` if prompted. You can delete the old DynamoDB lock table when no longer needed.
 
 ### Investigating Drift
 

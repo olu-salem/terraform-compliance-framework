@@ -24,6 +24,12 @@ variable "enable_pci_standard" {
   default     = false
 }
 
+variable "cloudtrail_s3_force_destroy" {
+  description = "If true, delete all object versions when destroying the CloudTrail bucket. Use false in production."
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   description = "Resource tags. CostCenter, Owner, Environment, and DataClass are required."
   type        = map(string)

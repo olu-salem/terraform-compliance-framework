@@ -97,11 +97,17 @@ variable "kms_key_arn" {
   default     = null
 }
 
+variable "require_cost_center_tag" {
+  description = "When false, CostCenter is not required on var.tags (for accounts whose Organization tag policy rejects every CostCenter value you can set)."
+  type        = bool
+  default     = true
+}
+
 variable "tags" {
   description = <<-EOT
     Resource tags. The following tags are REQUIRED by OPA compliance policy:
       - Environment : dev | staging | prod
-      - CostCenter  : Finance department code for chargeback
+      - CostCenter  : Finance department code for chargeback (unless require_cost_center_tag = false)
       - Owner       : Team email address responsible for resource
       - DataClass   : public | internal | confidential | restricted
     
@@ -115,7 +121,7 @@ variable "tags" {
   }
 
   validation {
-    condition     = contains(keys(var.tags), "CostCenter")
+    condition     = !var.require_cost_center_tag || contains(keys(var.tags), "CostCenter")
     error_message = "Tag 'CostCenter' is required. OPA compliance policy: TAGGING-002."
   }
 

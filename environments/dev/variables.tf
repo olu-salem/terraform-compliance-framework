@@ -33,8 +33,21 @@ variable "availability_zones" {
 }
 
 variable "cost_center" {
-  description = "Finance department cost center code."
+  description = <<-EOT
+    CostCenter tag value when omit_cost_center_tag is false. Leave empty to use the AWS account ID.
+    Ignored when omit_cost_center_tag is true (no CostCenter tag is applied).
+  EOT
   type        = string
+  default     = ""
+}
+
+variable "omit_cost_center_tag" {
+  description = <<-EOT
+    When true, resources are not tagged with CostCenter. Use in personal/lab accounts where
+    Organization tag policies reject all CostCenter values you can supply. Production should use false.
+  EOT
+  type        = bool
+  default     = false
 }
 
 variable "owner_email" {
@@ -55,7 +68,7 @@ variable "security_alert_emails" {
 }
 
 variable "dev_vpn_cidrs" {
-  description = "CIDRs allowed to reach the EKS API (office/VPN IPs)."
+  description = "Public routable CIDRs for the EKS public API (e.g. office egress /32). Not VPC-private ranges."
   type        = list(string)
   default     = []
 }

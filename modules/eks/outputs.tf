@@ -59,5 +59,5 @@ output "secrets_kms_key_arn" {
 
 output "kubeconfig_command" {
   description = "AWS CLI command to update local kubeconfig for this cluster."
-  value       = "aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${data.aws_caller_identity.current.account_id}"
+  value       = "aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${data.aws_region.current.name}"
 }

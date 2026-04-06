@@ -19,12 +19,23 @@ terraform {
   }
 }
 
+moved {
+  from = aws_eks_addon.coredns
+  to   = aws_eks_addon.coredns[0]
+}
+
 locals {
   cluster_name = "${var.name}-${var.environment}-eks"
 
+  # Public EKS API endpoint only accepts publicly routable CIDRs (not RFC1918).
+  # Empty list with public access enabled falls back to 0.0.0.0/0 for dev/lab; restrict in prod.
+  public_access_cidrs = var.public_api_endpoint ? (
+    length(var.api_allowed_cidrs) > 0 ? var.api_allowed_cidrs : ["0.0.0.0/0"]
+  ) : []
+
   common_tags = merge(var.tags, {
-    Module    = "eks"
-    ManagedBy = "terraform"
+    Module                                        = "eks"
+    ManagedBy                                     = "terraform"
     "kubernetes.io/cluster/${local.cluster_name}" = "owned"
   })
 }
@@ -35,7 +46,7 @@ locals {
 # =============================================================================
 
 resource "aws_kms_key" "eks_secrets" {
-  description             = "KMS key for EKS secrets encryption — ${local.cluster_name}"
+  description             = "KMS key for EKS secrets encryption - ${local.cluster_name}"
   deletion_window_in_days = 30
   enable_key_rotation     = true # CIS 2.8 — Annual key rotation
 
@@ -64,6 +75,27 @@ resource "aws_kms_key" "eks_secrets" {
           "kms:DescribeKey"
         ]
         Resource = "*"
+      },
+      {
+        Sid    = "AllowCloudWatchLogs"
+        Effect = "Allow"
+        Principal = {
+          Service = "logs.${data.aws_region.current.name}.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:CreateGrant",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          ArnLike = {
+            "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:*"
+          }
+        }
       }
     ]
   })
@@ -80,6 +112,7 @@ resource "aws_kms_alias" "eks_secrets" {
 }
 
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 # =============================================================================
 # EKS CLUSTER IAM ROLE
@@ -118,7 +151,7 @@ resource "aws_eks_cluster" "main" {
     subnet_ids              = var.private_subnet_ids
     endpoint_private_access = true
     endpoint_public_access  = var.public_api_endpoint # false in prod
-    public_access_cidrs     = var.public_api_endpoint ? var.api_allowed_cidrs : []
+    public_access_cidrs     = local.public_access_cidrs
 
     security_group_ids = [aws_security_group.cluster.id]
   }
@@ -146,6 +179,11 @@ resource "aws_eks_cluster" "main" {
   }
 
   depends_on = [aws_iam_role_policy_attachment.cluster_policy]
+
+  # Wait for AWS to finish deleting node groups before cluster delete (avoids ResourceInUse).
+  timeouts {
+    delete = "45m"
+  }
 
   tags = merge(local.common_tags, {
     Name = local.cluster_name
@@ -204,7 +242,7 @@ resource "aws_iam_role_policy_attachment" "node_cni_policy" {
 }
 
 resource "aws_iam_role_policy_attachment" "node_ecr_policy" {
-  role       = aws_iam_role.node_group.name
+  role = aws_iam_role.node_group.name
   # Read-only — nodes pull images but cannot push
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
@@ -227,7 +265,7 @@ resource "aws_eks_node_group" "main" {
   node_role_arn   = aws_iam_role.node_group.arn
   subnet_ids      = var.private_subnet_ids # Nodes always in private subnets
 
-  ami_type       = each.value.ami_type       # e.g., AL2_x86_64
+  ami_type       = each.value.ami_type # e.g., AL2023_x86_64_STANDARD
   instance_types = each.value.instance_types
   disk_size      = each.value.disk_size
 
@@ -245,7 +283,7 @@ resource "aws_eks_node_group" "main" {
   force_update_version = true
 
   labels = merge(each.value.labels, {
-    "node-group" = each.key
+    "node-group"  = each.key
     "environment" = var.environment
   })
 
@@ -271,6 +309,10 @@ resource "aws_eks_node_group" "main" {
     aws_iam_role_policy_attachment.node_cni_policy,
     aws_iam_role_policy_attachment.node_ecr_policy,
   ]
+
+  timeouts {
+    delete = "90m"
+  }
 }
 
 # =============================================================================
@@ -280,7 +322,7 @@ resource "aws_eks_node_group" "main" {
 
 resource "aws_security_group" "cluster" {
   name        = "${local.cluster_name}-cluster-sg"
-  description = "EKS cluster API server security group — managed by Terraform"
+  description = "EKS cluster API server security group - managed by Terraform"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -313,39 +355,65 @@ resource "aws_security_group" "cluster" {
 # Managed versions ensure security patches are applied automatically
 # =============================================================================
 
-resource "aws_eks_addon" "coredns" {
+resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = aws_eks_cluster.main.name
-  addon_name                  = "coredns"
-  addon_version               = var.addon_versions.coredns
+  addon_name                  = "vpc-cni"
+  addon_version               = var.addon_versions.vpc_cni
+  resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
-  tags                        = local.common_tags
+  service_account_role_arn    = var.vpc_cni_use_irsa ? aws_iam_role.vpc_cni_irsa.arn : null
+  configuration_values = var.vpc_cni_use_prefix_delegation ? jsonencode({
+    env = {
+      ENABLE_PREFIX_DELEGATION = "true"
+      WARM_PREFIX_TARGET       = "1"
+    }
+  }) : null
+  tags = local.common_tags
+
+  depends_on = [aws_eks_node_group.main]
+
+  timeouts {
+    create = "45m"
+    update = "45m"
+    delete = "45m"
+  }
 }
 
 resource "aws_eks_addon" "kube_proxy" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "kube-proxy"
   addon_version               = var.addon_versions.kube_proxy
+  resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   tags                        = local.common_tags
+
+  depends_on = [aws_eks_node_group.main, aws_eks_addon.vpc_cni]
+
+  timeouts {
+    create = "45m"
+    update = "45m"
+    delete = "45m"
+  }
 }
 
-resource "aws_eks_addon" "vpc_cni" {
+resource "aws_eks_addon" "coredns" {
+  count = var.enable_coredns_addon ? 1 : 0
+
   cluster_name                = aws_eks_cluster.main.name
-  addon_name                  = "vpc-cni"
-  addon_version               = var.addon_versions.vpc_cni
+  addon_name                  = "coredns"
+  addon_version               = var.addon_versions.coredns
+  configuration_values        = var.coredns_addon_configuration_values
+  resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
+  tags                        = local.common_tags
 
-  # IRSA for VPC CNI — manage ENI permissions via service account
-  service_account_role_arn = aws_iam_role.vpc_cni_irsa.arn
+  depends_on = [aws_eks_node_group.main, aws_eks_addon.vpc_cni, aws_eks_addon.kube_proxy]
 
-  configuration_values = jsonencode({
-    env = {
-      ENABLE_PREFIX_DELEGATION = "true" # More IPs per node
-      WARM_PREFIX_TARGET       = "1"
-    }
-  })
-
-  tags = local.common_tags
+  timeouts {
+    create = "120m"
+    update = "120m"
+    delete = "45m"
+  }
 }
 
 resource "aws_eks_addon" "ebs_csi" {
@@ -353,8 +421,23 @@ resource "aws_eks_addon" "ebs_csi" {
   addon_name                  = "aws-ebs-csi-driver"
   addon_version               = var.addon_versions.ebs_csi
   service_account_role_arn    = aws_iam_role.ebs_csi_irsa.arn
+  resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   tags                        = local.common_tags
+
+  # Whole coredns resource (count may be 0); when count=0 nothing to wait on.
+  depends_on = [
+    aws_eks_node_group.main,
+    aws_eks_addon.vpc_cni,
+    aws_eks_addon.kube_proxy,
+    aws_eks_addon.coredns,
+  ]
+
+  timeouts {
+    create = "120m"
+    update = "120m"
+    delete = "45m"
+  }
 }
 
 # =============================================================================
